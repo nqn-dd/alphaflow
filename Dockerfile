@@ -39,6 +39,10 @@ RUN git clone https://github.com/aqlaboratory/openfold.git /opt/openfold \
   && cd /opt/openfold \
   && git checkout 1d878a1203e6d662a209a95f71b90083d5fc079c
 
+# Downgrade pip to <24.1 so it accepts pytorch_lightning==1.5.10's invalid metadata
+# (the .* version suffix in torch dependency spec was deprecated in pip 24.1)
+RUN pip install "pip<24.1"
+
 # Installing into the base environment since the container only runs AlphaFlow
 RUN conda env update -n base --file /opt/openfold/environment.yml \
   && conda clean --all --force-pkgs-dirs --yes
