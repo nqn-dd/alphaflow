@@ -1,0 +1,8 @@
+# FastAPI service layer (on top of existing alphaflow dependencies)
+fastapi>=0.104.0
+uvicorn>=0.24.0
+httpx>=0.25.0
+redis>=5.0.0
+azure-storage-blob>=12.19.0
+pydantic>=2.5.0
+biopython>=1.79

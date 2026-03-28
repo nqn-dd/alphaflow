@@ -1,6 +1,10 @@
 from alphaflow.utils.logging import get_logger
 logger = get_logger(__name__)
-import torch, os, wandb, time
+import torch, os, time
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import pandas as pd
 
 from .esmfold import ESMFold
@@ -56,11 +60,17 @@ class ModelWrapper(pl.LightningModule):
         
         noisy = self.harmonic_prior.sample(batch_dims)
         try:
-            noisy = rmsdalign(batch['pseudo_beta'], noisy, weights=batch['pseudo_beta_mask']).detach() # ?!?!
-        except:
-            logger.warning('SVD failed to converge!')
-            batch['t'] = torch.ones(batch_dims, device=device)
-            return
+            noisy = rmsdalign(batch['pseudo_beta'], noisy, weights=batch['pseudo_beta_mask']).detach()
+        except Exception as e:
+            logger.warning(f'SVD failed to converge: {e}. Retrying with perturbed input.')
+            # Perturb slightly and retry instead of silently falling back to t=1.0
+            try:
+                perturbed = noisy + torch.randn_like(noisy) * 1e-4
+                noisy = rmsdalign(batch['pseudo_beta'], perturbed, weights=batch['pseudo_beta_mask']).detach()
+            except Exception:
+                logger.error('SVD retry also failed. Falling back to t=1.0 (no conditioning).')
+                batch['t'] = torch.ones(batch_dims, device=device)
+                return
         
         t = torch.rand(batch_dims, device=device)
         noisy_beta = (1 - t[:,None,None]) * batch['pseudo_beta'] + t[:,None,None] * noisy

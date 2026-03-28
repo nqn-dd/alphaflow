@@ -1,0 +1,101 @@
+name: Deploy AlphaFlow to Azure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'Dockerfile'
+      - 'requirements-service.txt'
+      - '.github/workflows/deploy-azure.yml'
+  workflow_dispatch:
+
+env:
+  AZURE_CONTAINER_REGISTRY: novoquantnexusacr.azurecr.io
+  IMAGE_NAME: alphaflow
+  RESOURCE_GROUP: novo-data-rg
+  CONTAINER_APP_NAME: alphaflow
+  CONTAINER_APP_ENV: novo-services-env
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name novoquantnexusacr
+
+      - name: Build and push image to ACR
+        run: |
+          docker build -t ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker push ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker tag ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Deploy to Azure Container Apps (GPU)
+        run: |
+          # Check if container app exists
+          EXISTS=$(az containerapp show --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query "name" -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$EXISTS" ]; then
+            echo "Creating new container app with GPU workload profile..."
+            az containerapp create \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --environment ${{ env.CONTAINER_APP_ENV }} \
+              --image ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --registry-server ${{ env.AZURE_CONTAINER_REGISTRY }} \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
+              --workload-profile-name Consumption-GPU-NC24-A100 \
+              --target-port 8025 \
+              --ingress internal \
+              --cpu 24 \
+              --memory 220Gi \
+              --env-vars \
+                PORT=8025 \
+                CUDA_VISIBLE_DEVICES=0 \
+                MAX_CONCURRENT_JOBS=2 \
+                WEIGHTS_PATH=/opt/alphaflow/params/esmflow_md_base_202402.pt \
+                API_KEY=${{ secrets.ALPHAFLOW_API_KEY }} \
+                AZURE_REDIS_URL=${{ secrets.AZURE_REDIS_URL }} \
+                AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }} \
+                AZURE_STORAGE_CONTAINER=alphaflow-results
+          else
+            echo "Updating existing container app..."
+            az containerapp update \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --image ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+              --set-env-vars \
+                PORT=8025 \
+                CUDA_VISIBLE_DEVICES=0 \
+                MAX_CONCURRENT_JOBS=2 \
+                WEIGHTS_PATH=/opt/alphaflow/params/esmflow_md_base_202402.pt \
+                API_KEY=${{ secrets.ALPHAFLOW_API_KEY }} \
+                AZURE_REDIS_URL=${{ secrets.AZURE_REDIS_URL }} \
+                AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }} \
+                AZURE_STORAGE_CONTAINER=alphaflow-results
+          fi
+
+      - name: Get internal endpoint
+        run: |
+          FQDN=$(az containerapp show --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo ""
+          echo "============================================"
+          echo "AlphaFlow deployed to Azure!"
+          echo "============================================"
+          echo ""
+          echo "Internal endpoint: https://$FQDN"
+          echo "GPU: NVIDIA A100 (NC24-A100)"
+          echo "Model: ESMFlow MD-distilled base"
+          echo ""

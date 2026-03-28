@@ -3,21 +3,11 @@
 # Modifications Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This container build on the OpenFold container, and installs AlphaFlow.
-# At the end, you may wish to download the weights to run ESMFlow, so they are cached in the image.
-# It is a large image, about 20GB without weights, 25GB with weights.
+# This container builds on the OpenFold container, and installs AlphaFlow + FastAPI service.
+# Image size: ~25GB with ESMFlow weights baked in.
 #
-# OpenFold is quite difficult to get working, as it installs custom torch kernels, so it is used as the base.
-# Adapted from https://github.com/aws-solutions-library-samples/aws-batch-arch-for-protein-folding/blob/main/infrastructure/docker/openfold/Dockerfile
-#
-# To run most recent image (after building), with GPUS, and mounting a directory `outputs`
-# docker run --gpus all -v "$(pwd)/outputs:/outputs" -it "$(docker image ls -q | head -n1)" bash
-#
-# Note that you may need to install nvidia-container-toolkit to run.
-# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/1.15.0/install-guide.html
-#
-# Test command to output into mounted directory:
-# python predict.py --mode esmfold --input_csv splits/atlas_test.csv --pdb 6o2v_A --weights params/esmflow_md_base_202402.pt --samples 5 --outpdb /outputs
+# OpenFold is quite difficult to get working, as it installs custom torch kernels.
+# Adapted from https://github.com/aws-solutions-library-samples/aws-batch-arch-for-protein-folding
 
 FROM nvcr.io/nvidia/cuda:11.3.1-cudnn8-runtime-ubuntu18.04
 
@@ -34,7 +24,6 @@ RUN apt-get update \
   libcublas-dev-11-3 \
   libcusolver-dev-11-3 \
   git \
-  awscli \
   && rm -rf /var/lib/apt/lists/* \
   && apt-get autoremove -y \
   && apt-get clean
@@ -50,8 +39,7 @@ RUN git clone https://github.com/aqlaboratory/openfold.git /opt/openfold \
   && cd /opt/openfold \
   && git checkout 1d878a1203e6d662a209a95f71b90083d5fc079c
 
-# installing into the base environment since the docker container wont do anything other than run openfold and alphaflow
-# RUN conda install -qy conda==4.13.0 \
+# Installing into the base environment since the container only runs AlphaFlow
 RUN conda env update -n base --file /opt/openfold/environment.yml \
   && conda clean --all --force-pkgs-dirs --yes
 
@@ -65,22 +53,38 @@ RUN cd /opt/openfold \
   && pip3 install --upgrade pip --no-cache-dir \
   && python3 setup.py install
 
-# Install alphaflow
-RUN git clone https://github.com/bjing2016/alphaflow.git /opt/alphaflow
+# Install AlphaFlow from our fork
+COPY alphaflow/ /opt/alphaflow/alphaflow/
+COPY predict.py train.py /opt/alphaflow/
+COPY splits/ /opt/alphaflow/splits/
 
-# Install alphaflow packages ~ as defined in README
-# torch CUDA version should match your machine
+# Install alphaflow packages (torch CUDA version must match container base)
 RUN python -m pip install numpy==1.21.2 pandas==1.5.3 && \
     python -m pip install torch==1.13.1+cu117 -f https://download.pytorch.org/whl/torch_stable.html && \
     python -m pip install biopython==1.79 dm-tree==0.1.6 modelcif==0.7 ml-collections==0.1.0 scipy==1.7.3 absl-py einops && \
-    python -m pip install pytorch_lightning==2.0.4 fair-esm mdtraj wandb
+    python -m pip install pytorch_lightning==2.0.4 fair-esm mdtraj
+
+# Install FastAPI service dependencies
+COPY requirements-service.txt /opt/alphaflow/
+RUN python -m pip install --no-cache-dir -r /opt/alphaflow/requirements-service.txt
+
+# Copy service wrapper
+COPY main.py /opt/alphaflow/
 
 WORKDIR /opt/alphaflow
 
-# Optionally, download weights as part of the image, so the cached image contains them and we don't re-download each time
-# ESMFlow and ESM2
-# RUN mkdir params && \
-#     aws s3 cp s3://alphaflow/params/esmflow_md_base_202402.pt params/esmflow_pdb_md_202402.pt && \
-#    mkdir -p /root/.cache/torch/hub/checkpoints && \
-#     wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D.pt https://dl.fbaipublicfiles.com/fair-esm/models/esm2_t36_3B_UR50D.pt && \
-#     wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D-contact-regression.pt https://dl.fbaipublicfiles.com/fair-esm/regression/esm2_t36_3B_UR50D-contact-regression.pt
+# Bake ESMFlow weights into the image (do not download at runtime)
+RUN mkdir -p params && \
+    wget -q -O params/esmflow_md_base_202402.pt \
+      "https://alphaflow.s3.amazonaws.com/params/esmflow_md_base_202402.pt"
+
+# Bake ESM2 weights (used by ESMFold backbone)
+RUN mkdir -p /root/.cache/torch/hub/checkpoints && \
+    wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D.pt \
+      https://dl.fbaipublicfiles.com/fair-esm/models/esm2_t36_3B_UR50D.pt && \
+    wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D-contact-regression.pt \
+      https://dl.fbaipublicfiles.com/fair-esm/regression/esm2_t36_3B_UR50D-contact-regression.pt
+
+EXPOSE 8025
+
+CMD ["python", "main.py"]

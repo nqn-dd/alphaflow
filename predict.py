@@ -21,7 +21,11 @@ parser.add_argument('--runtime_json', type=str, default=None)
 parser.add_argument('--no_overwrite', action='store_true', default=False)
 args = parser.parse_args()
 
-import torch, tqdm, os, wandb, json, time
+import torch, tqdm, os, json, time
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import pandas as pd
 import pytorch_lightning as pl
 import numpy as np
