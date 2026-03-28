@@ -78,16 +78,17 @@ COPY main.py /opt/alphaflow/
 WORKDIR /opt/alphaflow
 
 # Bake ESMFlow weights into the image (do not download at runtime)
+# Mirrored to our HuggingFace repo for reliability (originals: alphaflow.s3.amazonaws.com, dl.fbaipublicfiles.com)
 RUN mkdir -p params && \
     wget -q -O params/esmflow_md_base_202402.pt \
-      "https://alphaflow.s3.amazonaws.com/params/esmflow_md_base_202402.pt"
+      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/params/esmflow_md_base_202402.pt"
 
 # Bake ESM2 weights (used by ESMFold backbone)
 RUN mkdir -p /root/.cache/torch/hub/checkpoints && \
     wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D.pt \
-      https://dl.fbaipublicfiles.com/fair-esm/models/esm2_t36_3B_UR50D.pt && \
+      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/esm2/esm2_t36_3B_UR50D.pt" && \
     wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D-contact-regression.pt \
-      https://dl.fbaipublicfiles.com/fair-esm/regression/esm2_t36_3B_UR50D-contact-regression.pt
+      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/esm2/esm2_t36_3B_UR50D-contact-regression.pt"
 
 EXPOSE 8025
 
