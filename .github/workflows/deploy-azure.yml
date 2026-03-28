@@ -56,11 +56,13 @@ jobs:
               --registry-server ${{ env.AZURE_CONTAINER_REGISTRY }} \
               --registry-username ${{ secrets.ACR_USERNAME }} \
               --registry-password ${{ secrets.ACR_PASSWORD }} \
-              --workload-profile-name Consumption-GPU-NC24-A100 \
+              --workload-profile-name gpu-a100 \
               --target-port 8025 \
               --ingress internal \
               --cpu 24 \
               --memory 220Gi \
+              --min-replicas 0 \
+              --max-replicas 3 \
               --env-vars \
                 PORT=8025 \
                 CUDA_VISIBLE_DEVICES=0 \
