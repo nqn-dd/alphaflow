@@ -310,7 +310,7 @@ def extract_sequence_from_pdb(pdb_content: str) -> tuple[str, str]:
     Returns (sequence, name) tuple.
     """
     from Bio.PDB import PDBParser
-    from Bio.PDB.Polypeptide import protein_letters_3to1
+    from Bio.PDB.Polypeptide import three_to_one, is_aa
     import io
 
     parser = PDBParser(QUIET=True)
@@ -321,9 +321,8 @@ def extract_sequence_from_pdb(pdb_content: str) -> tuple[str, str]:
         for chain in model_obj:
             residues = []
             for residue in chain:
-                resname = residue.get_resname().strip()
-                if resname in protein_letters_3to1:
-                    residues.append(protein_letters_3to1[resname])
+                if is_aa(residue, standard=True):
+                    residues.append(three_to_one(residue.get_resname().strip()))
             if residues:
                 name = f"{structure.header.get('idcode', 'unknown')}_{chain.id}"
                 return "".join(residues), name
