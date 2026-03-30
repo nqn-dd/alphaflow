@@ -504,6 +504,11 @@ async def _run_dynamics_job(
     """Background task: run inference and store results."""
     try:
         async with gpu_semaphore:
+            # Verify model is loaded before starting inference
+            if not model:
+                await fail_job(job_id, "Model not loaded — AlphaFlow is still warming up. Resubmit in 1-2 minutes.")
+                return
+
             await update_job_status(job_id, "running", {
                 "percentage": 10,
                 "message": f"Generating {n_frames} conformations for {name} ({len(sequence)} residues)",
