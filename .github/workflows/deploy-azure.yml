@@ -89,6 +89,76 @@ jobs:
                 AZURE_STORAGE_CONTAINER=alphaflow-results
           fi
 
+      - name: Verify new revision becomes Healthy
+        run: |
+          set -euo pipefail
+
+          echo "Looking for the revision that matches image tag ${{ github.sha }}..."
+          sleep 30
+
+          LATEST_REV=""
+          for i in 1 2 3 4 5 6 7 8; do
+            LATEST_REV=$(az containerapp revision list \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --query "sort_by([?contains(properties.template.containers[0].image, '${{ github.sha }}')], &properties.createdTime)[-1].name" \
+              -o tsv 2>/dev/null || echo "")
+            if [ -n "$LATEST_REV" ]; then
+              break
+            fi
+            echo "Revision not visible yet (attempt $i/8), waiting 15s..."
+            sleep 15
+          done
+
+          if [ -z "$LATEST_REV" ]; then
+            echo "::error::Could not find a revision matching image SHA ${{ github.sha }}"
+            exit 1
+          fi
+
+          echo "New revision: $LATEST_REV"
+          echo "Polling healthState (max 90 minutes, 60 x 90s)..."
+
+          HEALTH=""
+          for i in $(seq 1 60); do
+            HEALTH=$(az containerapp revision show \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --revision "$LATEST_REV" \
+              --query "properties.healthState" -o tsv 2>/dev/null || echo "Unknown")
+            PROV=$(az containerapp revision show \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --revision "$LATEST_REV" \
+              --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+            REPLICAS=$(az containerapp revision show \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --revision "$LATEST_REV" \
+              --query "properties.replicas" -o tsv 2>/dev/null || echo "0")
+            echo "Attempt $i/60: healthState=$HEALTH provisioningState=$PROV replicas=$REPLICAS"
+
+            if [ "$HEALTH" = "Healthy" ]; then
+              echo "::notice::Revision $LATEST_REV is Healthy"
+              exit 0
+            fi
+            if [ "$PROV" = "Failed" ]; then
+              echo "::error::Revision $LATEST_REV provisioningState=Failed"
+              break
+            fi
+            sleep 90
+          done
+
+          echo "::error::Revision $LATEST_REV did not become Healthy within 90 minutes (last healthState=$HEALTH)"
+          echo ""
+          echo "=== Container console logs ==="
+          az containerapp logs show \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --revision "$LATEST_REV" \
+            --tail 100 --type console 2>&1 \
+            || echo "(console logs unavailable)"
+          exit 1
+
       - name: Get internal endpoint
         run: |
           FQDN=$(az containerapp show --name ${{ env.CONTAINER_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
