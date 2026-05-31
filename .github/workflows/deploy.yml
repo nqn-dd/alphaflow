@@ -1,0 +1,141 @@
+# qmcp/alphaflow — build → ECR → EKS Deployment via SSM-to-bastion → kubectl.
+# First real GPU service. Deployment manifests with nvidia.com/gpu: 1 +
+# GPU nodeSelector/toleration. replicas: 0 by default (scale-to-zero);
+# bump to 1 to warm a GPU node via cluster-autoscaler.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'main.py'
+      - 'requirements.txt'
+      - 'k8s/**'
+      - '.aws/deploy-on-bastion.sh'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      skip_deploy:
+        description: "Build + push image only, skip kubectl apply"
+        required: false
+        default: "false"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 803031031627.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: qmcp/alphaflow
+  APP_NAME: alphaflow
+  APP_NAMESPACE: qmcp-services
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Assume qmcp-gh-ecr-push via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::803031031627:role/qmcp-gh-ecr-push
+          role-session-name: gh-${{ github.run_id }}-build
+          aws-region: ${{ env.AWS_REGION }}
+      - name: ECR login
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-12)
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA" >> "$GITHUB_OUTPUT"
+      - name: Build + push (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:buildcache
+          cache-to:   type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max
+
+  deploy:
+    needs: build
+    if: ${{ github.event.inputs.skip_deploy != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      BASTION_ID: i-08e57e6372c967104
+      MANIFEST_S3_KEY: alphaflow/k8s/deployment.yaml
+      NS_MANIFEST_S3_KEY: alphaflow/k8s/namespace.yaml
+      DEPLOY_SCRIPT_S3_KEY: alphaflow/k8s/deploy-on-bastion.sh
+      API_KEY_SECRET_ID: qmcp/alphaflow-api-key
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assume qmcp-gh-ssm-deploy via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::803031031627:role/qmcp-gh-ssm-deploy
+          role-session-name: gh-${{ github.run_id }}-deploy
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Render manifest + upload deploy artifacts to S3
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          sed "s|__IMAGE__|$IMAGE|g" k8s/deployment.yaml > /tmp/deployment-rendered.yaml
+          grep -q "$IMAGE" /tmp/deployment-rendered.yaml
+          aws s3 cp /tmp/deployment-rendered.yaml s3://qmcp-staging/$MANIFEST_S3_KEY --region $AWS_REGION
+          aws s3 cp k8s/namespace.yaml             s3://qmcp-staging/$NS_MANIFEST_S3_KEY --region $AWS_REGION
+          aws s3 cp .aws/deploy-on-bastion.sh      s3://qmcp-staging/$DEPLOY_SCRIPT_S3_KEY --region $AWS_REGION
+      - name: Deploy via SSM-to-bastion (kubectl apply)
+        run: |
+          set -euo pipefail
+          CMD=$(cat <<EOF
+          set -euxo pipefail
+          aws s3 cp s3://qmcp-staging/${DEPLOY_SCRIPT_S3_KEY} /tmp/deploy-on-bastion.sh --region us-east-1 --quiet
+          chmod +x /tmp/deploy-on-bastion.sh
+          APP_NAME=${APP_NAME} \\
+          APP_NAMESPACE=${APP_NAMESPACE} \\
+          MANIFEST_S3_KEY=${MANIFEST_S3_KEY} \\
+          NS_MANIFEST_S3_KEY=${NS_MANIFEST_S3_KEY} \\
+          API_KEY_SECRET_ID=${API_KEY_SECRET_ID} \\
+          /tmp/deploy-on-bastion.sh
+          EOF
+          )
+          PAYLOAD=$(jq -n --arg cmd "$CMD" '{commands: [$cmd]}')
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$BASTION_ID" --document-name AWS-RunShellScript \
+            --timeout-seconds 1800 --parameters "$PAYLOAD" --region "$AWS_REGION" \
+            --query 'Command.CommandId' --output text)
+          echo "::notice::SSM CommandId=$CMD_ID"
+          while true; do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$BASTION_ID" --region "$AWS_REGION" --query 'Status' --output text 2>/dev/null || echo Pending)
+            echo "[poll] status=$STATUS"
+            case "$STATUS" in
+              Success)
+                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$BASTION_ID" --region "$AWS_REGION" --query 'StandardOutputContent' --output text
+                exit 0 ;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::deploy failed: $STATUS"
+                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$BASTION_ID" --region "$AWS_REGION" --query '{stdout:StandardOutputContent,stderr:StandardErrorContent}' --output text
+                exit 1 ;;
+            esac
+            sleep 30
+          done
+      - name: Report (scale-to-zero, no smoke at 0 replicas)
+        run: |
+          set -euo pipefail
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$BASTION_ID" --document-name AWS-RunShellScript --timeout-seconds 60 \
+            --parameters '{"commands":["set -uxo pipefail","export KUBECONFIG=/root/.kube/config","kubectl -n qmcp-services get deploy,svc alphaflow -o wide || true"]}' \
+            --region "$AWS_REGION" --query 'Command.CommandId' --output text)
+          sleep 8
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$BASTION_ID" --region "$AWS_REGION" --query 'StandardOutputContent' --output text
