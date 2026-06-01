@@ -7,7 +7,8 @@ name: deploy
 
 on:
   push:
-    branches: [main]
+    # alphaflow's default branch is `master`, not `main` — include both.
+    branches: [main, master]
     paths:
       - 'Dockerfile'
       - 'main.py'
