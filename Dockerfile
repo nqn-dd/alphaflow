@@ -40,10 +40,22 @@ RUN git clone https://github.com/aqlaboratory/openfold.git /opt/openfold \
   && git checkout 1d878a1203e6d662a209a95f71b90083d5fc079c
 
 # Pin pip<24.1 inside environment.yml so conda doesn't install a newer pip
-# that rejects pytorch_lightning==1.5.10's invalid metadata (torch>=1.7.*)
-RUN sed -i '/^dependencies:/a\  - pip<24.1' /opt/openfold/environment.yml
+# that rejects pytorch_lightning==1.5.10's invalid metadata (torch>=1.7.*).
+#
+# Also strip any --hash= entries from the pip section. The upstream OpenFold
+# environment.yml ships with hash pins that no longer match the transitive
+# deps pip 23 resolves today (aiohttp, multidict, propcache, lightning-utilities,
+# etc.). Once any line has a hash, pip enters --require-hashes mode and
+# fails the whole install with "THESE PACKAGES DO NOT MATCH THE HASHES FROM
+# THE REQUIREMENTS FILE". Dropping the hash pins lets pip's resolver work
+# normally; the version pins themselves are untouched.
+RUN sed -i '/^dependencies:/a\  - pip<24.1' /opt/openfold/environment.yml \
+  && sed -i '/--hash=/d' /opt/openfold/environment.yml \
+  && sed -i 's/  *\\$//' /opt/openfold/environment.yml
 
-# Installing into the base environment since the container only runs AlphaFlow
+# Installing into the base environment since the container only runs AlphaFlow.
+# --no-deps-of-deps NOT used — we still want pip to resolve the dependency tree;
+# we just don't want it to enforce stale hashes.
 RUN conda env update -n base --file /opt/openfold/environment.yml \
   && conda clean --all --force-pkgs-dirs --yes
 
