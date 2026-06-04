@@ -20,7 +20,8 @@ from typing import Optional, Dict, Any, List
 
 import httpx
 import redis.asyncio as aioredis
-from azure.storage.blob import BlobServiceClient
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -45,9 +46,12 @@ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
 # Model weights
 WEIGHTS_PATH = os.environ.get("WEIGHTS_PATH", "/opt/alphaflow/params/esmflow_md_base_202402.pt")
 
-# Azure Blob Storage
-AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")
-AZURE_STORAGE_CONTAINER = os.environ.get("AZURE_STORAGE_CONTAINER", "alphaflow-results")
+# S3 results bucket (was Azure Blob Storage pre-AWS cutover). Auth via IRSA
+# (qmcp-irsa-alphaflow has s3:PutObject on qmcp-data-lake/alphaflow/*). No
+# static creds needed.
+S3_RESULTS_BUCKET = os.environ.get("ALPHAFLOW_RESULTS_BUCKET", "qmcp-data-lake")
+S3_RESULTS_PREFIX = os.environ.get("ALPHAFLOW_RESULTS_PREFIX", "alphaflow/")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # Redis
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -56,7 +60,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 # Globals (initialized on startup)
 # ---------------------------------------------------------------------------
 redis_client: Optional[aioredis.Redis] = None
-blob_service_client: Optional[BlobServiceClient] = None
+s3_client: Optional[Any] = None  # boto3 S3 client (was BlobServiceClient pre-cutover)
 gpu_semaphore: Optional[asyncio.Semaphore] = None
 model = None  # Loaded once on startup
 
@@ -129,7 +133,7 @@ def load_model():
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global redis_client, blob_service_client, gpu_semaphore, model
+    global redis_client, s3_client, gpu_semaphore, model
 
     gpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
@@ -142,22 +146,22 @@ async def startup():
         logger.warning(f"Redis not available: {e}. Job tracking will be in-memory only.")
         redis_client = None
 
-    # Azure Blob Storage
-    if AZURE_STORAGE_CONNECTION_STRING:
-        try:
-            blob_service_client = BlobServiceClient.from_connection_string(
-                AZURE_STORAGE_CONNECTION_STRING
-            )
-            try:
-                blob_service_client.create_container(AZURE_STORAGE_CONTAINER)
-            except Exception:
-                pass  # Already exists
-            logger.info(f"Connected to Azure Blob Storage (container: {AZURE_STORAGE_CONTAINER})")
-        except Exception as e:
-            logger.warning(f"Azure Blob Storage not available: {e}")
-            blob_service_client = None
-    else:
-        logger.warning("AZURE_STORAGE_CONNECTION_STRING not set. Results stored locally only.")
+    # S3 results storage. Best-effort init: if boto3 init fails or the bucket
+    # isn't reachable, the service keeps running and results stay local only
+    # (same posture as the pre-cutover Azure Blob path when the connection
+    # string was unset).
+    try:
+        s3_client = boto3.client("s3", region_name=AWS_REGION)
+        s3_client.head_bucket(Bucket=S3_RESULTS_BUCKET)
+        logger.info(
+            f"Connected to S3 (bucket: {S3_RESULTS_BUCKET}, prefix: {S3_RESULTS_PREFIX})"
+        )
+    except (BotoCoreError, ClientError) as e:
+        logger.warning(f"S3 not available: {e}. Results stored locally only.")
+        s3_client = None
+    except Exception as e:
+        logger.warning(f"S3 init failed: {e}. Results stored locally only.")
+        s3_client = None
 
     # Load model into GPU
     try:
@@ -253,36 +257,44 @@ async def fail_job(job_id: str, error: str):
         logger.error(f"Failed to mark job {job_id} as failed: {e}")
 
 # ---------------------------------------------------------------------------
-# Azure Blob Storage
+# S3 results upload (was Azure Blob Storage pre-cutover; same public surface).
 # ---------------------------------------------------------------------------
 async def upload_results_to_blob(pdb_content: str, job_id: str, metadata: Dict) -> Optional[str]:
-    """Upload ensemble PDB and metadata to Azure Blob Storage."""
-    if not blob_service_client:
-        logger.warning("Blob storage not available, skipping upload")
+    """Upload ensemble PDB and metadata to S3. Returns the S3 key for the
+    PDB blob, or None if the client isn't available (degraded mode)."""
+    if not s3_client:
+        logger.warning("S3 not available, skipping upload")
         return None
 
     loop = asyncio.get_event_loop()
-    container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER)
-    prefix = f"alphaflow/{job_id}"
+    prefix = f"{S3_RESULTS_PREFIX.rstrip('/')}/{job_id}"
 
     # Upload multi-model PDB
-    pdb_blob = f"{prefix}/ensemble.pdb"
+    pdb_key = f"{prefix}/ensemble.pdb"
     await loop.run_in_executor(
         None,
-        lambda: container_client.upload_blob(pdb_blob, pdb_content, overwrite=True),
-    )
-
-    # Upload metadata
-    meta_blob = f"{prefix}/metadata.json"
-    await loop.run_in_executor(
-        None,
-        lambda: container_client.upload_blob(
-            meta_blob, json.dumps(metadata, indent=2), overwrite=True
+        lambda: s3_client.put_object(
+            Bucket=S3_RESULTS_BUCKET,
+            Key=pdb_key,
+            Body=pdb_content.encode("utf-8"),
+            ContentType="chemical/x-pdb",
         ),
     )
 
-    logger.info(f"Uploaded results for {job_id} to Azure Blob")
-    return f"{prefix}/ensemble.pdb"
+    # Upload metadata
+    meta_key = f"{prefix}/metadata.json"
+    await loop.run_in_executor(
+        None,
+        lambda: s3_client.put_object(
+            Bucket=S3_RESULTS_BUCKET,
+            Key=meta_key,
+            Body=json.dumps(metadata, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        ),
+    )
+
+    logger.info(f"Uploaded results for {job_id} to s3://{S3_RESULTS_BUCKET}/{pdb_key}")
+    return pdb_key
 
 # ---------------------------------------------------------------------------
 # PDB Fetching & Sequence Extraction
@@ -584,7 +596,7 @@ async def health_check():
         "gpu_available": gpu_available,
         "model_loaded": model is not None,
         "redis_connected": redis_ok,
-        "blob_storage_connected": blob_service_client is not None,
+        "blob_storage_connected": s3_client is not None,  # kept name for FE compatibility; backed by S3 now
         "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
         "port": PORT,
     }
