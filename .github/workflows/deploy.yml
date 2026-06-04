@@ -50,21 +50,34 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: ECR login
         uses: aws-actions/amazon-ecr-login@v2
-      - name: Fetch ESMFlow weights from S3 mirror
+      - name: Fetch ESMFlow + ESM2 weights from S3 mirror
         # Mirror of huggingface.co/quantnexusai/alphaflow-weights — pulling
         # from our S3 instead of HF makes the build deterministic (no HF
         # rate-limit / xet-bridge flake) and faster in us-east-1.
-        # qmcp-gh-ecr-push grants s3:GetObject on
-        # qmcp-data-lake/alphaflow-weights/* (sid ReadAlphaflowWeights).
-        # 2.78 GB file; SHA256 verified to guard against silent corruption.
+        # qmcp-gh-ecr-push grants s3:GetObject + kms:Decrypt on
+        # qmcp-data-lake/alphaflow-weights/* (sids ReadAlphaflowWeights +
+        # KMSDecryptDataLake — qmcp-data-lake is SSE-KMS).
+        # ~8.5 GB total; SHA256 verified to guard against silent corruption.
         run: |
-          mkdir -p params
+          mkdir -p params esm2
           aws s3 cp \
             s3://qmcp-data-lake/alphaflow-weights/esmflow_md_base_202402.pt \
             params/esmflow_md_base_202402.pt \
             --no-progress
-          ls -lh params/
-          echo "15f7a6288c23ca4330ebeb83510b1181db5d4fe46743575ba5653de4cee9ac37  params/esmflow_md_base_202402.pt" | sha256sum --check
+          aws s3 cp \
+            s3://qmcp-data-lake/alphaflow-weights/esm2_t36_3B_UR50D.pt \
+            esm2/esm2_t36_3B_UR50D.pt \
+            --no-progress
+          aws s3 cp \
+            s3://qmcp-data-lake/alphaflow-weights/esm2_t36_3B_UR50D-contact-regression.pt \
+            esm2/esm2_t36_3B_UR50D-contact-regression.pt \
+            --no-progress
+          ls -lh params/ esm2/
+          cat <<'EOF' | sha256sum --check
+          15f7a6288c23ca4330ebeb83510b1181db5d4fe46743575ba5653de4cee9ac37  params/esmflow_md_base_202402.pt
+          7de8b4082ba15891959ab368b77ce3886697af1efb16d3c9e9e7b0c5d3f07500  esm2/esm2_t36_3B_UR50D.pt
+          4da500eab246481dc9c8c95bc7b1d02f2803d761c380b0e95186d4a07d0fc84e  esm2/esm2_t36_3B_UR50D-contact-regression.pt
+          EOF
       - name: Set image metadata
         id: meta
         run: |

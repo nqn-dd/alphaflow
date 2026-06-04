@@ -99,12 +99,16 @@ WORKDIR /opt/alphaflow
 # SHA256:    15f7a6288c23ca4330ebeb83510b1181db5d4fe46743575ba5653de4cee9ac37
 COPY params/esmflow_md_base_202402.pt params/esmflow_md_base_202402.pt
 
-# Bake ESM2 weights (used by ESMFold backbone)
-RUN mkdir -p /root/.cache/torch/hub/checkpoints && \
-    wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D.pt \
-      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/esm2/esm2_t36_3B_UR50D.pt" && \
-    wget -q -O /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D-contact-regression.pt \
-      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/esm2/esm2_t36_3B_UR50D-contact-regression.pt"
+# Bake ESM2 weights (used by ESMFold backbone). Mirrored from
+# huggingface.co/quantnexusai/alphaflow-weights/esm2/* to
+# s3://qmcp-data-lake/alphaflow-weights/ — fetched by the GHA workflow
+# step before docker build, lives at ./esm2/ in the build context.
+# SHA256:
+#   7de8b4082ba15891959ab368b77ce3886697af1efb16d3c9e9e7b0c5d3f07500  esm2/esm2_t36_3B_UR50D.pt
+#   4da500eab246481dc9c8c95bc7b1d02f2803d761c380b0e95186d4a07d0fc84e  esm2/esm2_t36_3B_UR50D-contact-regression.pt
+RUN mkdir -p /root/.cache/torch/hub/checkpoints
+COPY esm2/esm2_t36_3B_UR50D.pt /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D.pt
+COPY esm2/esm2_t36_3B_UR50D-contact-regression.pt /root/.cache/torch/hub/checkpoints/esm2_t36_3B_UR50D-contact-regression.pt
 
 EXPOSE 8025
 
