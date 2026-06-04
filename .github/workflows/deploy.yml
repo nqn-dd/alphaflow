@@ -50,6 +50,21 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: ECR login
         uses: aws-actions/amazon-ecr-login@v2
+      - name: Fetch ESMFlow weights from S3 mirror
+        # Mirror of huggingface.co/quantnexusai/alphaflow-weights — pulling
+        # from our S3 instead of HF makes the build deterministic (no HF
+        # rate-limit / xet-bridge flake) and faster in us-east-1.
+        # qmcp-gh-ecr-push grants s3:GetObject on
+        # qmcp-data-lake/alphaflow-weights/* (sid ReadAlphaflowWeights).
+        # 2.78 GB file; SHA256 verified to guard against silent corruption.
+        run: |
+          mkdir -p params
+          aws s3 cp \
+            s3://qmcp-data-lake/alphaflow-weights/esmflow_md_base_202402.pt \
+            params/esmflow_md_base_202402.pt \
+            --no-progress
+          ls -lh params/
+          echo "15f7a6288c23ca4330ebeb83510b1181db5d4fe46743575ba5653de4cee9ac37  params/esmflow_md_base_202402.pt" | sha256sum --check
       - name: Set image metadata
         id: meta
         run: |

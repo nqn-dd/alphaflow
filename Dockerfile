@@ -89,11 +89,15 @@ COPY main.py /opt/alphaflow/
 
 WORKDIR /opt/alphaflow
 
-# Bake ESMFlow weights into the image (do not download at runtime)
-# Mirrored to our HuggingFace repo for reliability (originals: alphaflow.s3.amazonaws.com, dl.fbaipublicfiles.com)
-RUN mkdir -p params && \
-    wget -q -O params/esmflow_md_base_202402.pt \
-      "https://huggingface.co/quantnexusai/alphaflow-weights/resolve/main/params/esmflow_md_base_202402.pt"
+# Bake ESMFlow weights into the image. The weights file is fetched from
+# our S3 mirror by the GHA workflow step `Fetch ESMFlow weights from S3
+# mirror` BEFORE this docker build, so it lives in the build context at
+# ./params/esmflow_md_base_202402.pt. Determinism win vs the pre-cutover
+# `wget huggingface.co/quantnexusai/alphaflow-weights` (HF rate-limited
+# the runner; xet-bridge presigned URLs flaked on cache invalidation).
+# S3 source: s3://qmcp-data-lake/alphaflow-weights/esmflow_md_base_202402.pt
+# SHA256:    15f7a6288c23ca4330ebeb83510b1181db5d4fe46743575ba5653de4cee9ac37
+COPY params/esmflow_md_base_202402.pt params/esmflow_md_base_202402.pt
 
 # Bake ESM2 weights (used by ESMFold backbone)
 RUN mkdir -p /root/.cache/torch/hub/checkpoints && \
