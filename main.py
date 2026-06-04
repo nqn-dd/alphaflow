@@ -1,9 +1,9 @@
 """
 AlphaFlow Conformational Exploration Service
-GPU-accelerated conformational ensemble generation on Azure Container Apps.
+GPU-accelerated conformational ensemble generation on AWS EKS.
 
 Wraps AlphaFlow/ESMFlow inference in a FastAPI service with async job tracking,
-Azure Blob result storage, and quanta-mcp compatible Redis status updates.
+S3 result storage, and quanta-mcp compatible Redis status updates.
 
 Port 8025 - Internal service
 """
