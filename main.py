@@ -50,7 +50,7 @@ AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRIN
 AZURE_STORAGE_CONTAINER = os.environ.get("AZURE_STORAGE_CONTAINER", "alphaflow-results")
 
 # Redis
-REDIS_URL = os.environ.get("AZURE_REDIS_URL", os.environ.get("REDIS_URL", "redis://localhost:6379"))
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 # ---------------------------------------------------------------------------
 # Globals (initialized on startup)
