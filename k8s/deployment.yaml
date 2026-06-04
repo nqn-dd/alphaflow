@@ -67,8 +67,16 @@ spec:
           env:
             - name: PORT
               value: "8025"
+            - name: AWS_REGION
+              value: us-east-1
             - name: REDIS_URL
               value: "redis://qmcp-redis.h2uwye.ng.0001.use1.cache.amazonaws.com:6379/0"
+            # S3 for ensemble PDB + metadata. IRSA on qmcp-irsa-alphaflow
+            # grants s3:PutObject on qmcp-data-lake/alphaflow/*.
+            - name: ALPHAFLOW_RESULTS_BUCKET
+              value: qmcp-data-lake
+            - name: ALPHAFLOW_RESULTS_PREFIX
+              value: "alphaflow/"
             # In-cluster sibling services (consolidated under qmcp-services)
             - name: ADDIE_SERVICE_URL
               value: http://addie-models.qmcp-services.svc.cluster.local:8025
